@@ -106,13 +106,19 @@ if (NL_OS != "Darwin") {
 
   try {
     const content = await Neutralino.filesystem.readFile(filePath);
+    const filename = filePath.split(/[\\/]/).pop();
 
     function applyContent() {
-      const editor = document.getElementById('markdown-editor');
       const dropzone = document.getElementById('dropzone');
-      if (!editor) return;
-      editor.value = content;
-      editor.dispatchEvent(new Event('input'));
+      if (typeof window.openFileFromDisk === 'function') {
+        window.openFileFromDisk(content, filename, filePath);
+      } else {
+        // Fallback if script.js hasn't initialised the helper yet.
+        const editor = document.getElementById('markdown-editor');
+        if (!editor) return;
+        editor.value = content;
+        editor.dispatchEvent(new Event('input'));
+      }
       if (dropzone) dropzone.style.display = 'none';
     }
 

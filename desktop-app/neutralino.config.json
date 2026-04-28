@@ -13,7 +13,7 @@
     "enabled": true,
     "writeToLogFile": true
   },
-  "nativeAllowList": ["app.*", "os.*", "filesystem.readFile", "debug.log"],
+  "nativeAllowList": ["app.*", "os.*", "filesystem.readFile", "filesystem.writeFile", "debug.log"],
   "globalVariables": {},
   "modes": {
     "window": {

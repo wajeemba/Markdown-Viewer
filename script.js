@@ -504,18 +504,25 @@ This is a fully client-side application. Your content never leaves your browser 
     return 'Untitled ' + untitledCounter;
   }
 
-  function createTab(content, title, viewMode) {
+  function createTab(content, title, viewMode, filePath) {
     if (content === undefined) content = '';
     if (title === undefined) title = null;
     if (viewMode === undefined) viewMode = 'split';
+    if (filePath === undefined) filePath = null;
     return {
       id: 'tab_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8),
       title: title || 'Untitled',
       content: content,
       scrollPos: 0,
       viewMode: viewMode,
+      filePath: filePath,
       createdAt: Date.now()
     };
+  }
+
+  // Neutralino is only present in the desktop build.
+  function isDesktop() {
+    return typeof Neutralino !== 'undefined' && typeof NL_VERSION !== 'undefined';
   }
 
   function renderTabBar(tabsArr, currentActiveTabId) {
@@ -753,18 +760,26 @@ This is a fully client-side application. Your content never leaves your browser 
     renderTabBar(tabs, activeTabId);
   }
 
-  function newTab(content, title) {
+  function newTab(content, title, filePath) {
     if (content === undefined) content = '';
     if (tabs.length >= 20) {
       alert('Maximum of 20 tabs reached. Please close an existing tab to open a new one.');
       return;
     }
     if (!title) title = nextUntitledTitle();
-    const tab = createTab(content, title);
+    const tab = createTab(content, title, undefined, filePath || null);
     tabs.push(tab);
     switchTab(tab.id);
     markdownEditor.focus();
+    return tab;
   }
+
+  // Called by main.js when a file is opened from disk via Neutralino
+  // (CLI arg, native open dialog, etc). Browser builds never call this.
+  window.openFileFromDisk = function(content, filename, filePath) {
+    const title = (filename || '').replace(/\.(md|markdown)$/i, '') || 'Untitled';
+    return newTab(content, title, filePath);
+  };
 
   function closeTab(tabId) {
     const idx = tabs.findIndex(function(t) { return t.id === tabId; });
@@ -1713,7 +1728,7 @@ This is a fully client-side application. Your content never leaves your browser 
       mobileToggleSync.classList.remove("border-primary");
     }
   });
-  mobileImportBtn.addEventListener("click", () => fileInput.click());
+  mobileImportBtn.addEventListener("click", () => triggerFileOpen());
   mobileImportGithubBtn.addEventListener("click", () => {
     closeMobileMenu();
     openGitHubImportModal();
@@ -1818,11 +1833,63 @@ This is a fully client-side application. Your content never leaves your browser 
     renderMarkdown();
   });
 
+  // Single entry point for "user wants to open a file from disk".
+  // Desktop build → native Neutralino dialog (path-bound tab).
+  // Browser build → hidden <input type="file"> (no path available).
+  function triggerFileOpen() {
+    if (isDesktop()) {
+      openFileViaNeutralino();
+    } else {
+      fileInput.click();
+    }
+  }
+
+  // Native file open via Neutralino. Returns true if a file was opened.
+  async function openFileViaNeutralino() {
+    if (!isDesktop()) return false;
+    let entries;
+    try {
+      entries = await Neutralino.os.showOpenDialog('Open Markdown', {
+        filters: [
+          { name: 'Markdown', extensions: ['md', 'markdown'] },
+          { name: 'All files', extensions: ['*'] }
+        ]
+      });
+    } catch (err) {
+      console.error('Open dialog failed:', err);
+      return false;
+    }
+    const path = Array.isArray(entries) ? entries[0] : null;
+    if (!path) return false;
+    try {
+      const content = await Neutralino.filesystem.readFile(path);
+      const filename = path.split(/[\\/]/).pop();
+      window.openFileFromDisk(content, filename, path);
+      if (dropzone) dropzone.style.display = "none";
+      return true;
+    } catch (err) {
+      console.error('Read failed:', err);
+      alert('Could not open file: ' + (err && err.message ? err.message : err));
+      return false;
+    }
+  }
+
   if (importFromFileButton) {
     importFromFileButton.addEventListener("click", function (e) {
       e.preventDefault();
-      fileInput.click();
+      triggerFileOpen();
     });
+  }
+
+  // On desktop, "From files" stops being an import (copy contents in) and
+  // becomes a real open (tab is bound to the file on disk). Reflect that.
+  if (isDesktop()) {
+    if (importFromFileButton) importFromFileButton.textContent = "Open file…";
+    if (mobileImportBtn) {
+      const icon = mobileImportBtn.querySelector('i');
+      mobileImportBtn.title = "Open file";
+      mobileImportBtn.innerHTML = (icon ? icon.outerHTML : '<i class="bi bi-upload me-2"></i>') + ' Open file…';
+    }
   }
 
   if (importFromGithubButton) {
@@ -2807,7 +2874,7 @@ This is a fully client-side application. Your content never leaves your browser 
   dropzone.addEventListener("drop", handleDrop, false);
   dropzone.addEventListener("click", function (e) {
     if (e.target !== closeDropzoneBtn && !closeDropzoneBtn.contains(e.target)) {
-      fileInput.click();
+      triggerFileOpen();
     }
   });
   closeDropzoneBtn.addEventListener("click", function(e) {
@@ -2832,10 +2899,50 @@ This is a fully client-side application. Your content never leaves your browser 
     }
   }
 
+  // Save current editor content to disk via Neutralino. Returns true on success.
+  // If the active tab has a known filePath, write there; otherwise prompt for one.
+  async function saveActiveTabToDisk(forceSaveAs) {
+    if (!isDesktop()) return false;
+    const tab = tabs.find(function(t) { return t.id === activeTabId; });
+    if (!tab) return false;
+    let path = forceSaveAs ? null : tab.filePath;
+    if (!path) {
+      try {
+        path = await Neutralino.os.showSaveDialog('Save Markdown', {
+          defaultPath: (tab.title || 'document') + '.md',
+          filters: [
+            { name: 'Markdown', extensions: ['md', 'markdown'] },
+            { name: 'All files', extensions: ['*'] }
+          ]
+        });
+      } catch (err) {
+        console.error('Save dialog failed:', err);
+        return false;
+      }
+      if (!path) return false;
+    }
+    try {
+      await Neutralino.filesystem.writeFile(path, markdownEditor.value);
+      tab.filePath = path;
+      tab.content = markdownEditor.value;
+      saveTabsToStorage(tabs);
+      return true;
+    } catch (err) {
+      console.error('Write failed:', err);
+      alert('Could not save file: ' + (err && err.message ? err.message : err));
+      return false;
+    }
+  }
+
   document.addEventListener("keydown", function (e) {
-    if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+    if ((e.ctrlKey || e.metaKey) && e.key === "s" && !e.shiftKey) {
       e.preventDefault();
-      exportMd.click();
+      if (isDesktop()) {
+        saveActiveTabToDisk(false);
+      } else {
+        // Browser build: fall back to the FileSaver download flow.
+        exportMd.click();
+      }
     }
     if ((e.ctrlKey || e.metaKey) && e.key === "c") {
       const activeEl = document.activeElement;
